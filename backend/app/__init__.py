@@ -1,0 +1,2 @@
+"""HangmanAI backend package."""
+
