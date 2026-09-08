@@ -1,16 +1,18 @@
-import {
-  Activity,
-  BarChart3,
-  BrainCircuit,
-  GitBranch,
-  ListTree,
-  Play,
-  RefreshCw,
-  Search,
-  Split,
-  StepForward
-} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis
+} from "recharts";
+import { About } from "./components/About";
+import { HangmanFigure } from "./components/HangmanFigure";
+import { LetterKeyboard } from "./components/LetterKeyboard";
 import {
   createGame,
   fetchHealth,
@@ -35,24 +37,10 @@ import type {
   TreeSummaryResponse,
   VocabularySummaryRow
 } from "./types";
-import { About } from "./components/About";
-import { HangmanFigure } from "./components/HangmanFigure";
-import { LetterKeyboard } from "./components/LetterKeyboard";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis
-} from "recharts";
 
-type Tab = "play" | "tree" | "dashboard" | "roots" | "about";
+type Tab = "play" | "tree" | "experiments" | "roots" | "research";
 
-type DashboardRow = {
+type ExperimentRow = {
   length: number;
   total_words: number;
   best_first_guess: string;
@@ -64,12 +52,12 @@ type DashboardRow = {
   training_time: number;
 };
 
-const tabs: Array<{ id: Tab; label: string; icon: typeof Play }> = [
-  { id: "play", label: "Play", icon: Play },
-  { id: "tree", label: "Tree Explorer", icon: GitBranch },
-  { id: "dashboard", label: "Lengths", icon: BarChart3 },
-  { id: "roots", label: "Roots", icon: Split },
-  { id: "about", label: "About", icon: Search }
+const tabs: Array<{ id: Tab; label: string }> = [
+  { id: "play", label: "Play" },
+  { id: "tree", label: "Tree" },
+  { id: "experiments", label: "Experiments" },
+  { id: "roots", label: "Roots" },
+  { id: "research", label: "Research" }
 ];
 
 function integer(value: number | undefined) {
@@ -84,15 +72,29 @@ function percent(value: number | undefined) {
   return typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "n/a";
 }
 
+function singleLetter(value: string | undefined | null) {
+  const normalized = value?.trim().toLowerCase();
+  return normalized && /^[a-z]$/.test(normalized) ? normalized : undefined;
+}
+
+function guessDisplay(value: string | undefined | null, fallback = "fixed") {
+  return singleLetter(value)?.toUpperCase() ?? fallback;
+}
+
 function patternDisplay(pattern: string | undefined) {
   return pattern ? pattern.split("").join(" ") : "";
 }
 
-function normalizeDashboardRows(results: PerformanceRow[], trees: TreeIndexRow[], vocabulary: VocabularySummaryRow[]) {
+function nodeLabel(nodeId: number | null | undefined) {
+  if (nodeId === null || typeof nodeId === "undefined") return "fallback";
+  return String(nodeId).padStart(4, "0");
+}
+
+function normalizeExperimentRows(results: PerformanceRow[], trees: TreeIndexRow[], vocabulary: VocabularySummaryRow[]) {
   const vocabByLength = new Map(vocabulary.map((row) => [Number(row.length), Number(row.number_of_words)]));
   if (results.length) {
     return results.map(
-      (row): DashboardRow => ({
+      (row): ExperimentRow => ({
         length: Number(row.length),
         total_words: Number(row.total_words),
         best_first_guess: row.best_first_guess,
@@ -106,7 +108,7 @@ function normalizeDashboardRows(results: PerformanceRow[], trees: TreeIndexRow[]
     );
   }
   return trees.map(
-    (row): DashboardRow => ({
+    (row): ExperimentRow => ({
       length: Number(row.length),
       total_words: Number(row.words ?? vocabByLength.get(Number(row.length)) ?? 0),
       best_first_guess: row.best_first_guess ?? "",
@@ -146,13 +148,23 @@ function App() {
     [vocabulary]
   );
   const lengthOptions = trainedLengths.length ? trainedLengths : vocabularyLengths;
-  const dashboardRows = useMemo(
-    () => normalizeDashboardRows(results, trees.filter((tree) => tree.weighting === "uniform"), vocabulary),
+  const experimentRows = useMemo(
+    () => normalizeExperimentRows(results, trees.filter((tree) => tree.weighting === "uniform"), vocabulary),
     [results, trees, vocabulary]
   );
-  const chartRows = dashboardRows.map((row) => ({
+  const playStats = experimentRows.find((row) => row.length === playLength);
+  const selectedStats = experimentRows.find((row) => row.length === selectedLength);
+  const hardestLength = experimentRows.reduce<ExperimentRow | null>((hardest, row) => {
+    if (!hardest) return row;
+    return row.win_rate < hardest.win_rate ? row : hardest;
+  }, null);
+  const easiestLength = experimentRows.reduce<ExperimentRow | null>((easiest, row) => {
+    if (!easiest) return row;
+    return row.win_rate > easiest.win_rate ? row : easiest;
+  }, null);
+  const chartRows = experimentRows.map((row) => ({
     ...row,
-    label: `${row.length}`,
+    label: String(row.length).padStart(2, "0"),
     winRatePct: row.win_rate * 100
   }));
   const rootChartRows = rootAnalysis.map((row) => ({
@@ -298,166 +310,146 @@ function App() {
 
   const decisionHistory = game?.decisions ?? [];
   const currentDecision = game?.decision ?? decisionHistory[decisionHistory.length - 1];
+  const featuredGuess = currentDecision?.guess ?? singleLetter(playStats?.best_first_guess);
+  const pathText = decisionHistory.length
+    ? decisionHistory
+        .map((decision, index) => {
+          const from = index === 0 ? "0000" : nodeLabel(decision.node_id);
+          return `${from} -${decision.guess.toUpperCase()}-> ${nodeLabel(decision.next_node_id)}`;
+        })
+        .join("  ")
+    : "0000";
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Learning the best Hangman tree by word length</p>
-          <h1>HangmanAI</h1>
-        </div>
-        <nav>
-          {tabs.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                className={activeTab === tab.id ? "active" : ""}
-                onClick={() => setActiveTab(tab.id)}
-                title={tab.label}
-              >
-                <Icon size={18} />
-                <span>{tab.label}</span>
-              </button>
-            );
-          })}
+      <header className="site-header">
+        <button className="wordmark" type="button" onClick={() => setActiveTab("play")}>
+          HangmanAI
+        </button>
+        <nav className="site-nav" aria-label="Primary">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              className={activeTab === tab.id ? "active" : ""}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              {tab.label}
+            </button>
+          ))}
         </nav>
       </header>
 
       {error && <div className="error global-error">{error}</div>}
 
       {activeTab === "play" && (
-        <section className="play-layout">
-          <div className="panel game-panel">
-            <div className="section-heading">
-              <BrainCircuit size={20} />
-              <h2>Decision Tree Player</h2>
-            </div>
-            <HangmanFigure state={game?.state} />
-            <div className="word-display">{game?.state.pattern_display ?? patternDisplay("_".repeat(playLength))}</div>
-            <div className="state-strip">
-              <span>{game?.state.remaining_lives ?? 6} lives</span>
-              <span>{game?.state.incorrect_letters.join(" ").toUpperCase() || "no misses"}</span>
-              <span className={`status ${game?.state.status ?? "playing"}`}>{game?.state.status ?? "playing"}</span>
-              {game?.model && <span>{game.model.length}-letter tree</span>}
-            </div>
-            {game?.solution && <div className="solution">Solution: {game.solution}</div>}
-            <LetterKeyboard state={game?.state} onGuess={handleManualGuess} disabled={loading || !game} />
+        <section className="play-page">
+          <div className="play-kicker">
+            <span>{playLength} letter tree</span>
+            <span>{integer(playStats?.total_words)} words</span>
+            <span>{playStats?.training_strategy ?? "tree"}</span>
+          </div>
+          <div className="play-question">
+            <p>What is the best Hangman strategy</p>
+            <h1>for a {playLength}-letter word?</h1>
           </div>
 
-          <aside className="side-stack">
-            <div className="panel controls-panel">
-              <div className="section-heading">
-                <RefreshCw size={20} />
-                <h2>Play Controls</h2>
+          <div className="play-stage">
+            <section className="game-theater" aria-label="Hangman game">
+              <HangmanFigure state={game?.state} />
+              <div className="pattern-line">{game?.state.pattern_display ?? patternDisplay("_".repeat(playLength))}</div>
+              <div className="ai-guess">
+                <span>Tree guesses</span>
+                <strong>{guessDisplay(featuredGuess, "?")}</strong>
               </div>
-              <label className="field">
-                Hidden word
-                <input
-                  value={secretWord}
-                  onChange={(event) => setSecretWord(event.target.value.toLowerCase())}
-                  placeholder="random from selected length"
-                />
-              </label>
-              <label className="field">
-                Word length
-                <select value={playLength} onChange={(event) => setPlayLength(Number(event.target.value))}>
-                  {lengthOptions.map((length) => (
-                    <option key={length} value={length}>
-                      {length} letters
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="button-row">
-                <button type="button" className="secondary-button" onClick={() => void startGame()} disabled={loading}>
-                  <RefreshCw size={18} />
-                  New
-                </button>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => void handleTreeStep()}
-                  disabled={loading || !game || game.state.status !== "playing"}
-                  title="Advance one tree decision"
-                >
-                  <StepForward size={18} />
-                  Step
-                </button>
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={() => void handleTreePlay()}
-                  disabled={loading || !game || game.state.status !== "playing"}
-                  title="Let the tree finish this game"
-                >
-                  <Play size={18} />
-                  Run
-                </button>
+              <LetterKeyboard
+                state={game?.state}
+                onGuess={handleManualGuess}
+                disabled={loading || !game}
+                highlightedLetter={featuredGuess}
+              />
+              <div className="game-status-line">
+                <span>{game?.state.remaining_lives ?? 6} lives</span>
+                <span>{game?.state.incorrect_letters.join(" ").toUpperCase() || "no misses"}</span>
+                <span className={`status ${game?.state.status ?? "ready"}`}>{game?.state.status ?? "ready"}</span>
+                {game?.solution && <span>solution {game.solution}</span>}
               </div>
-            </div>
+            </section>
 
-            <div className="panel">
-              <div className="section-heading">
-                <ListTree size={20} />
-                <h2>Current Traversal</h2>
-              </div>
-              <div className="metric-grid">
-                <div>
-                  <span>node</span>
-                  <strong>#{game?.model?.current_node_id ?? 0}</strong>
+            <aside className="experiment-rail" aria-label="Experiment controls and tree state">
+              <section className="control-strip">
+                <label>
+                  <span>Hidden word</span>
+                  <input
+                    value={secretWord}
+                    onChange={(event) => setSecretWord(event.target.value.toLowerCase())}
+                    placeholder="random from selected length"
+                  />
+                </label>
+                <label>
+                  <span>Length</span>
+                  <select value={playLength} onChange={(event) => setPlayLength(Number(event.target.value))}>
+                    {lengthOptions.map((length) => (
+                      <option key={length} value={length}>
+                        {length} letters
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="action-line">
+                  <button type="button" onClick={() => void startGame()} disabled={loading}>
+                    New word
+                  </button>
+                  <button type="button" onClick={() => void handleTreeStep()} disabled={loading || !game || game.state.status !== "playing"}>
+                    Step tree
+                  </button>
+                  <button type="button" className="run-action" onClick={() => void handleTreePlay()} disabled={loading || !game || game.state.status !== "playing"}>
+                    Run tree
+                  </button>
                 </div>
-                <div>
-                  <span>source</span>
-                  <strong>{game?.model?.model_source ?? "none"}</strong>
-                </div>
-                <div>
-                  <span>candidates</span>
-                  <strong>{integer(game?.analysis?.candidate_count)}</strong>
-                </div>
-                <div>
-                  <span>strategy</span>
-                  <strong>{game?.model?.training_strategy ?? "unloaded"}</strong>
-                </div>
-              </div>
-            </div>
+              </section>
 
-            <div className="panel decision-panel">
-              <div className="section-heading">
-                <GitBranch size={20} />
-                <h2>Last Decision</h2>
-              </div>
-              {currentDecision ? (
-                <div className="decision-card">
-                  <div className="decision-letter">{currentDecision.guess.toUpperCase()}</div>
-                  <dl>
-                    <dt>Tree node</dt>
-                    <dd>#{currentDecision.node_id}</dd>
-                    <dt>Outcome</dt>
-                    <dd>{currentDecision.outcome_pattern}</dd>
-                    <dt>Pattern</dt>
-                    <dd>{patternDisplay(currentDecision.resulting_pattern)}</dd>
-                    <dt>Branch</dt>
-                    <dd>{currentDecision.branch_found ? `#${currentDecision.next_node_id}` : "fallback"}</dd>
-                  </dl>
-                </div>
-              ) : (
-                <div className="empty-state">No decision has been made in this game.</div>
-              )}
-            </div>
-          </aside>
+              <section className="info-list">
+                <h2>Inside the tree</h2>
+                <dl>
+                  <dt>Tree position</dt>
+                  <dd>{nodeLabel(game?.model?.current_node_id)}</dd>
+                  <dt>Candidates</dt>
+                  <dd>{integer(game?.analysis?.candidate_count)}</dd>
+                  <dt>Depth</dt>
+                  <dd>{integer(currentDecision?.node.depth)}</dd>
+                  <dt>Strategy</dt>
+                  <dd>{game?.model?.training_strategy ?? playStats?.training_strategy ?? "unloaded"}</dd>
+                </dl>
+              </section>
+
+              <section className="why-block">
+                <h2>{currentDecision ? `Why ${currentDecision.guess.toUpperCase()}?` : "Why this letter?"}</h2>
+                <p>
+                  {currentDecision
+                    ? `Node ${nodeLabel(currentDecision.node_id)} selects ${currentDecision.guess.toUpperCase()}; the observed branch ${currentDecision.outcome_pattern} leads to ${nodeLabel(currentDecision.next_node_id)}.`
+                    : `The opening node for this length currently favors ${guessDisplay(playStats?.best_first_guess, "a fixed branch")} under the recorded ${playStats?.training_strategy ?? "tree"} policy.`}
+                </p>
+              </section>
+
+              <section className="tree-path">
+                <h2>Tree path</h2>
+                <code>{pathText}</code>
+              </section>
+            </aside>
+          </div>
         </section>
       )}
 
       {activeTab === "tree" && (
-        <section className="tree-layout">
-          <div className="panel tree-main">
-            <div className="section-heading">
-              <GitBranch size={20} />
-              <h2>Tree Explorer</h2>
-            </div>
-            <div className="toolbar">
+        <section className="tree-page">
+          <header className="editorial-heading">
+            <p>Lazy tree inspection</p>
+            <h1>One node at a time.</h1>
+          </header>
+          <div className="length-selector">
+            <label>
+              Length
               <select value={selectedLength} onChange={(event) => setSelectedLength(Number(event.target.value))}>
                 {lengthOptions.map((length) => (
                   <option key={length} value={length}>
@@ -465,120 +457,119 @@ function App() {
                   </option>
                 ))}
               </select>
-              <button type="button" className="secondary-button icon-button" onClick={() => void loadRootNode()} title="Root node">
-                <ListTree size={18} />
-              </button>
-            </div>
-            {treeNode ? (
-              <div className="node-grid">
-                <div className="node-spotlight">
-                  <span>node #{treeNode.node_id}</span>
-                  <strong>{treeNode.guess ? treeNode.guess.toUpperCase() : treeNode.leaf_type}</strong>
-                  <small>{patternDisplay(treeNode.pattern)}</small>
-                </div>
-                <div className="metric-grid">
-                  <div>
-                    <span>words</span>
-                    <strong>{integer(treeNode.candidate_count)}</strong>
-                  </div>
-                  <div>
-                    <span>win</span>
-                    <strong>{percent(treeNode.win_probability)}</strong>
-                  </div>
-                  <div>
-                    <span>mistakes</span>
-                    <strong>{fixed(treeNode.average_mistakes)}</strong>
-                  </div>
-                  <div>
-                    <span>branches</span>
-                    <strong>{treeNode.branches.length}</strong>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="empty-state">No serialized tree is available for this length yet.</div>
-            )}
+            </label>
+            <button type="button" onClick={() => void loadRootNode()}>
+              Root node
+            </button>
           </div>
 
-          <div className="panel branch-panel">
-            <div className="section-heading">
-              <Split size={20} />
-              <h2>Branches</h2>
-            </div>
-            <div className="path-strip">{nodePath.map((node) => `#${node}`).join(" / ")}</div>
-            <div className="branch-list">
-              {(treeNode?.branches ?? []).map((branch) => (
-                <button
-                  key={`${branch.outcome_pattern}-${branch.node_id}`}
-                  type="button"
-                  onClick={() => void loadNode(branch)}
-                  disabled={branch.node_id === null || loading}
-                  title={`Branch ${branch.outcome_pattern}`}
-                >
-                  <span>{branch.outcome_pattern}</span>
-                  <strong>{patternDisplay(branch.resulting_pattern)}</strong>
-                  <small>
-                    {integer(branch.word_count)} words · {percent(branch.probability)}
-                  </small>
-                </button>
-              ))}
-            </div>
-          </div>
+          {treeNode ? (
+            <div className="tree-composition">
+              <section className="node-sheet">
+                <span>Node {nodeLabel(treeNode.node_id)}</span>
+                <p>Guess</p>
+                <strong>{treeNode.guess ? treeNode.guess.toUpperCase() : treeNode.leaf_type}</strong>
+                <code>{patternDisplay(treeNode.pattern)}</code>
+              </section>
 
-          <div className="panel">
-            <div className="section-heading">
-              <Activity size={20} />
-              <h2>Samples</h2>
+              <section className="info-list node-stats">
+                <h2>State estimate</h2>
+                <dl>
+                  <dt>Candidates</dt>
+                  <dd>{integer(treeNode.candidate_count)}</dd>
+                  <dt>Lives</dt>
+                  <dd>{treeNode.remaining_lives}</dd>
+                  <dt>Win estimate</dt>
+                  <dd>{percent(treeNode.win_probability)}</dd>
+                  <dt>Avg mistakes</dt>
+                  <dd>{fixed(treeNode.average_mistakes)}</dd>
+                  <dt>Branches</dt>
+                  <dd>{treeNode.branches.length}</dd>
+                  <dt>State key</dt>
+                  <dd>{treeNode.state_key.slice(0, 12)}</dd>
+                </dl>
+              </section>
+
+              <section className="branch-ledger">
+                <h2>Branches</h2>
+                <div className="path-strip">{nodePath.map((node) => nodeLabel(node)).join(" / ")}</div>
+                <div className="branch-list">
+                  {treeNode.branches.map((branch) => (
+                    <button
+                      key={`${branch.outcome_pattern}-${branch.node_id}`}
+                      type="button"
+                      onClick={() => void loadNode(branch)}
+                      disabled={branch.node_id === null || loading}
+                    >
+                      <code>{branch.outcome_pattern}</code>
+                      <span>{integer(branch.word_count)} words</span>
+                      <span>{patternDisplay(branch.resulting_pattern)}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="word-samples">
+                <h2>Words reaching this node</h2>
+                <div>
+                  {treeNode.candidate_sample.map((candidate) => (
+                    <span key={candidate}>{candidate}</span>
+                  ))}
+                </div>
+              </section>
             </div>
-            <div className="candidate-list">
-              {(treeNode?.candidate_sample ?? []).map((candidate) => (
-                <span key={candidate}>{candidate}</span>
-              ))}
-            </div>
-          </div>
+          ) : (
+            <p className="empty-state">No serialized tree is available for this length yet.</p>
+          )}
         </section>
       )}
 
-      {activeTab === "dashboard" && (
-        <section className="dashboard-layout">
-          <div className="panel summary-panel">
-            <div className="section-heading">
-              <BarChart3 size={20} />
-              <h2>Word-Length Dashboard</h2>
+      {activeTab === "experiments" && (
+        <section className="experiments-page">
+          <header className="editorial-heading wide-heading">
+            <p>Experiment results</p>
+            <h1>Short words are the hard case.</h1>
+          </header>
+
+          <section className="result-sweep">
+            <div>
+              <span>Total vocabulary</span>
+              <strong>{integer(health?.vocabulary_size)}</strong>
             </div>
-            <div className="metric-grid wide">
-              <div>
-                <span>usable words</span>
-                <strong>{integer(health?.vocabulary_size)}</strong>
-              </div>
-              <div>
-                <span>trained trees</span>
-                <strong>{health?.trained_tree_count ?? 0}</strong>
-              </div>
-              <div>
-                <span>length buckets</span>
-                <strong>{vocabulary.length}</strong>
-              </div>
-              <div>
-                <span>wordfreq</span>
-                <strong>{health?.wordfreq_vocabulary_loaded ? "loaded" : "sample"}</strong>
-              </div>
+            <div>
+              <span>Trained trees</span>
+              <strong>{health?.trained_tree_count ?? 0}</strong>
             </div>
-            <div className="first-letter-strip">
-              {dashboardRows.map((row) => (
+            <div>
+              <span>Hardest length</span>
+              <strong>{hardestLength ? String(hardestLength.length).padStart(2, "0") : "n/a"}</strong>
+            </div>
+            <div>
+              <span>Easiest length</span>
+              <strong>{easiestLength ? String(easiestLength.length).padStart(2, "0") : "n/a"}</strong>
+            </div>
+          </section>
+
+          <section className="opening-strip">
+            <h2>Best opening guess</h2>
+            <div>
+              {experimentRows.map((row) => (
                 <span key={row.length}>
-                  {row.length}: {row.best_first_guess ? row.best_first_guess.toUpperCase() : "?"}
+                  <code>{String(row.length).padStart(2, "0")}</code>
+                  <strong>{guessDisplay(row.best_first_guess, "fixed")}</strong>
                 </span>
               ))}
             </div>
+          </section>
+
+          <div className="chart-spread">
+            <ChartBlock title="Win rate by length" rows={chartRows} dataKey="winRatePct" unit="%" color="#D7FF64" chart="line" />
+            <ChartBlock title="Average mistakes" rows={chartRows} dataKey="average_wrong_guesses" color="#E0A96D" chart="line" />
+            <ChartBlock title="Tree size" rows={chartRows} dataKey="node_count" color="#9CB8B3" chart="bar" />
+            <ChartBlock title="Vocabulary size" rows={chartRows} dataKey="total_words" color="#C8A7D8" chart="bar" />
           </div>
 
-          <ChartPanel title="Win Rate" rows={chartRows} dataKey="winRatePct" unit="%" color="#54d6a7" chart="line" />
-          <ChartPanel title="Average Mistakes" rows={chartRows} dataKey="average_wrong_guesses" color="#f6b86a" chart="line" />
-          <ChartPanel title="Tree Nodes" rows={chartRows} dataKey="node_count" color="#79a7ff" chart="bar" />
-          <ChartPanel title="Vocabulary Size" rows={chartRows} dataKey="total_words" color="#e778a6" chart="bar" />
-
-          <div className="panel table-panel">
+          <section className="results-table">
             <table>
               <thead>
                 <tr>
@@ -590,38 +581,36 @@ function App() {
                   <th>Nodes</th>
                   <th>Depth</th>
                   <th>Strategy</th>
-                  <th>Train s</th>
                 </tr>
               </thead>
               <tbody>
-                {dashboardRows.map((row) => (
+                {experimentRows.map((row) => (
                   <tr key={row.length}>
-                    <td>{row.length}</td>
+                    <td>{String(row.length).padStart(2, "0")}</td>
                     <td>{integer(row.total_words)}</td>
-                    <td>{row.best_first_guess.toUpperCase()}</td>
+                    <td>{guessDisplay(row.best_first_guess, "fixed")}</td>
                     <td>{percent(row.win_rate)}</td>
                     <td>{fixed(row.average_wrong_guesses)}</td>
                     <td>{integer(row.node_count)}</td>
                     <td>{integer(row.maximum_tree_depth)}</td>
                     <td>{row.training_strategy}</td>
-                    <td>{fixed(row.training_time, 1)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-            {!dashboardRows.length && <div className="empty-state">No evaluated tree reports are available yet.</div>}
-          </div>
+          </section>
         </section>
       )}
 
       {activeTab === "roots" && (
-        <section className="roots-layout">
-          <div className="panel root-chart-panel">
-            <div className="section-heading">
-              <Split size={20} />
-              <h2>Root Letter Explorer</h2>
-            </div>
-            <div className="toolbar">
+        <section className="roots-page">
+          <header className="editorial-heading">
+            <p>Root letter analysis</p>
+            <h1>Which letter should you guess first?</h1>
+          </header>
+          <div className="root-intro">
+            <label>
+              Word length
               <select value={selectedLength} onChange={(event) => setSelectedLength(Number(event.target.value))}>
                 {lengthOptions.map((length) => (
                   <option key={length} value={length}>
@@ -629,54 +618,60 @@ function App() {
                   </option>
                 ))}
               </select>
-              <button type="button" className="secondary-button icon-button" onClick={() => void refreshData()} title="Refresh">
-                <RefreshCw size={18} />
-              </button>
-            </div>
-            {rootChartRows.length ? (
-              <ResponsiveContainer width="100%" height={420}>
-                <BarChart data={rootChartRows}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#263542" />
-                  <XAxis dataKey="letter" stroke="#9fb0be" />
-                  <YAxis stroke="#9fb0be" unit="%" />
-                  <Tooltip contentStyle={{ background: "#101821", border: "1px solid #263542" }} />
-                  <Bar dataKey="winRatePct" fill="#54d6a7" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="empty-state">No root-letter analysis has been generated for this length.</div>
-            )}
+            </label>
+            <p>
+              {selectedStats
+                ? `${integer(selectedStats.total_words)} candidates. The trained tree opens with ${guessDisplay(selectedStats.best_first_guess, "a fixed branch")}.`
+                : "Choose a trained length to inspect its forced-root sweep."}
+            </p>
           </div>
 
-          <div className="panel root-rank-panel">
-            <div className="section-heading">
-              <ListTree size={20} />
-              <h2>Ranked Roots</h2>
-            </div>
-            <div className="root-list">
-              {rootAnalysis.map((row, index) => (
-                <div key={row.root_letter} className="root-row">
-                  <span>{index + 1}</span>
-                  <strong>{row.root_letter.toUpperCase()}</strong>
-                  <div className="bar-track">
-                    <span style={{ width: `${Math.max(3, Number(row.win_rate) * 100)}%` }} />
+          {rootChartRows.length ? (
+            <section className="root-analysis">
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={rootChartRows}>
+                  <CartesianGrid strokeDasharray="1 6" stroke="#292C2D" vertical={false} />
+                  <XAxis dataKey="letter" stroke="#8C918F" tickLine={false} axisLine={false} />
+                  <YAxis stroke="#8C918F" unit="%" tickLine={false} axisLine={false} />
+                  <Tooltip contentStyle={{ background: "#151718", border: "1px solid #292C2D", color: "#F1EEE8" }} />
+                  <Bar dataKey="winRatePct" fill="#D7FF64" />
+                </BarChart>
+              </ResponsiveContainer>
+
+              <div className="root-list">
+                {rootAnalysis.map((row, index) => (
+                  <div key={row.root_letter} className="root-row">
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <strong>{row.root_letter.toUpperCase()}</strong>
+                    <div className="hairline-bar">
+                      <span style={{ width: `${Math.max(2, Number(row.win_rate) * 100)}%` }} />
+                    </div>
+                    <small>
+                      {percent(Number(row.win_rate))} / {fixed(Number(row.average_mistakes))} mistakes
+                    </small>
                   </div>
-                  <small>
-                    {percent(Number(row.win_rate))} · {fixed(Number(row.average_mistakes))} mistakes
-                  </small>
-                </div>
-              ))}
-            </div>
-          </div>
+                ))}
+              </div>
+            </section>
+          ) : (
+            <p className="empty-state">No root-letter analysis has been generated for this length.</p>
+          )}
         </section>
       )}
 
-      {activeTab === "about" && <About />}
+      {activeTab === "research" && (
+        <About
+          vocabularySize={health?.vocabulary_size}
+          trainedTrees={health?.trained_tree_count}
+          hardestLength={hardestLength}
+          easiestLength={easiestLength}
+        />
+      )}
     </main>
   );
 }
 
-function ChartPanel({
+function ChartBlock({
   title,
   rows,
   dataKey,
@@ -692,35 +687,32 @@ function ChartPanel({
   chart: "line" | "bar";
 }) {
   return (
-    <div className="panel chart-panel">
-      <div className="section-heading">
-        <BarChart3 size={20} />
-        <h2>{title}</h2>
-      </div>
+    <section className="chart-block">
+      <h2>{title}</h2>
       {rows.length ? (
         <ResponsiveContainer width="100%" height={260}>
           {chart === "line" ? (
-            <LineChart data={rows}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#263542" />
-              <XAxis dataKey="label" stroke="#9fb0be" />
-              <YAxis stroke="#9fb0be" unit={unit} />
-              <Tooltip contentStyle={{ background: "#101821", border: "1px solid #263542" }} />
-              <Line type="monotone" dataKey={dataKey} stroke={color} strokeWidth={3} dot={{ r: 4 }} />
+            <LineChart data={rows} margin={{ top: 8, right: 12, bottom: 0, left: 6 }}>
+              <CartesianGrid strokeDasharray="1 6" stroke="#292C2D" vertical={false} />
+              <XAxis dataKey="label" stroke="#8C918F" tickLine={false} axisLine={false} />
+              <YAxis stroke="#8C918F" unit={unit} tickLine={false} axisLine={false} width={58} />
+              <Tooltip contentStyle={{ background: "#151718", border: "1px solid #292C2D", color: "#F1EEE8" }} />
+              <Line type="monotone" dataKey={dataKey} stroke={color} strokeWidth={2} dot={{ r: 2 }} />
             </LineChart>
           ) : (
-            <BarChart data={rows}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#263542" />
-              <XAxis dataKey="label" stroke="#9fb0be" />
-              <YAxis stroke="#9fb0be" unit={unit} />
-              <Tooltip contentStyle={{ background: "#101821", border: "1px solid #263542" }} />
-              <Bar dataKey={dataKey} fill={color} radius={[4, 4, 0, 0]} />
+            <BarChart data={rows} margin={{ top: 8, right: 12, bottom: 0, left: 6 }}>
+              <CartesianGrid strokeDasharray="1 6" stroke="#292C2D" vertical={false} />
+              <XAxis dataKey="label" stroke="#8C918F" tickLine={false} axisLine={false} />
+              <YAxis stroke="#8C918F" unit={unit} tickLine={false} axisLine={false} width={58} />
+              <Tooltip contentStyle={{ background: "#151718", border: "1px solid #292C2D", color: "#F1EEE8" }} />
+              <Bar dataKey={dataKey} fill={color} />
             </BarChart>
           )}
         </ResponsiveContainer>
       ) : (
-        <div className="empty-state">No rows available.</div>
+        <p className="empty-state">No rows available.</p>
       )}
-    </div>
+    </section>
   );
 }
 

@@ -1,62 +1,86 @@
-import { Brain, Database, GitBranch, Search, Split } from "lucide-react";
+type ResearchStat = {
+  length: number;
+  win_rate: number;
+  best_first_guess: string;
+};
 
-export function About() {
+type Props = {
+  vocabularySize?: number;
+  trainedTrees?: number;
+  hardestLength?: ResearchStat | null;
+  easiestLength?: ResearchStat | null;
+};
+
+function integer(value: number | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "n/a";
+}
+
+function percent(value: number | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "n/a";
+}
+
+export function About({ vocabularySize, trainedTrees, hardestLength, easiestLength }: Props) {
   return (
-    <section className="about-grid">
-      <article className="panel">
-        <div className="section-heading">
-          <Search size={20} />
-          <h2>Research Question</h2>
+    <section className="research-page">
+      <header className="research-hero">
+        <p>The question</p>
+        <h1>Is E really the best first guess?</h1>
+      </header>
+
+      <article className="research-block">
+        <span>01</span>
+        <div>
+          <h2>The experiment</h2>
+          <p>
+            A separate decision tree is trained for every word length. The player is the tree
+            itself: a node selects one letter, and the observed Hangman reveal pattern chooses the
+            next branch.
+          </p>
         </div>
-        <p>
-          HangmanAI asks whether the best first guess and later decisions change when the hidden
-          word length changes. The player is not an ensemble, neural model, or entropy agent: it is
-          a stored Hangman decision tree selected by word length.
-        </p>
       </article>
-      <article className="panel">
-        <div className="section-heading">
-          <GitBranch size={20} />
-          <h2>Multiway Tree</h2>
+
+      <article className="research-block">
+        <span>02</span>
+        <div>
+          <h2>The vocabulary</h2>
+          <p>
+            The English word forms come from wordfreq, cleaned into lowercase ASCII Hangman words
+            and grouped by exact length. The current dataset contains {integer(vocabularySize)} word
+            forms and {trainedTrees ?? 0} trained uniform trees.
+          </p>
         </div>
-        <p>
-          Each internal node stores one letter guess. Branches are full Hangman reveal patterns, so
-          a five-letter guess can split into outcomes such as 00000, 01000, or 10001 rather than a
-          simple yes-or-no test.
-        </p>
       </article>
-      <article className="panel">
-        <div className="section-heading">
-          <Brain size={20} />
-          <h2>Objective</h2>
+
+      <blockquote>
+        Short words are dramatically harder because each guess reveals less structure while the
+        mistake budget stays fixed.
+      </blockquote>
+
+      <article className="research-block">
+        <span>03</span>
+        <div>
+          <h2>The result</h2>
+          <p>
+            In the current uniform run, the hardest length is{" "}
+            {hardestLength ? `${hardestLength.length} letters at ${percent(hardestLength.win_rate)}` : "still loading"}.
+            The easiest measured bucket is{" "}
+            {easiestLength ? `${easiestLength.length} letters at ${percent(easiestLength.win_rate)}` : "still loading"}.
+            First guesses shift across length: short buckets often open with A, mid-length buckets
+            move to E, and longer buckets frequently start with I.
+          </p>
         </div>
-        <p>
-          Tree construction optimizes actual Hangman performance: maximize win rate first, then
-          prefer fewer wrong guesses, fewer total guesses, shallower traversal, and smaller trees.
-          Greedy, bounded-lookahead, and near-exact profiles record their own limits.
-        </p>
       </article>
-      <article className="panel">
-        <div className="section-heading">
-          <Database size={20} />
-          <h2>Vocabulary</h2>
+
+      <article className="research-block">
+        <span>04</span>
+        <div>
+          <h2>The limits</h2>
+          <p>
+            These are best trees found under recorded budgets and search profiles, not claims of
+            mathematical global optimality. The UI reports real generated metrics and leaves missing
+            root sweeps empty rather than filling in invented values.
+          </p>
         </div>
-        <p>
-          The research vocabulary is extracted from wordfreq using its English word-list iterator,
-          cleaned to lowercase ASCII words, grouped by exact length, and stored with each word's
-          Zipf frequency for later uniform versus frequency-weighted tree experiments.
-        </p>
-      </article>
-      <article className="panel">
-        <div className="section-heading">
-          <Split size={20} />
-          <h2>Root Letters</h2>
-        </div>
-        <p>
-          The root analysis rebuilds a tree under each possible first letter and evaluates the
-          resulting policy against every word of that length. That makes the traditional first-guess
-          advice measurable instead of assumed.
-        </p>
       </article>
     </section>
   );
