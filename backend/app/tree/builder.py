@@ -38,6 +38,10 @@ class TreeBuildConfig:
     sample_size: int = 12
     pruning_min_gain: float = 0.0
 
+    def __post_init__(self) -> None:
+        if self.node_budget < 1:
+            raise ValueError("Tree node_budget must allow at least one node.")
+
     @classmethod
     def from_profile(
         cls,
@@ -74,9 +78,13 @@ class HangmanTreeBuilder:
         words: list[str],
         weights: dict[str, float] | None = None,
         config: TreeBuildConfig | None = None,
+        start_node_id: int = 0,
+        reserved_node_ids: set[int] | None = None,
     ) -> None:
         if not words:
             raise ValueError("Cannot build a tree without words.")
+        if start_node_id < 0:
+            raise ValueError("start_node_id must be non-negative.")
         length = len(words[0])
         if any(len(word) != length for word in words):
             raise ValueError("A word-length-specific tree can only contain one length.")
@@ -88,7 +96,8 @@ class HangmanTreeBuilder:
         self.weights = tuple(self._word_weight(word, weights) for word in self.words)
         self.total_weight = sum(self.weights)
         self.nodes: dict[int, TreeNode] = {}
-        self._next_node_id = 0
+        self._next_node_id = start_node_id
+        self._reserved_node_ids = set(reserved_node_ids or set())
         self._estimate_cache: dict[tuple[tuple[int, ...], str, tuple[str, ...], int, int], TreeStats] = {}
         self._pattern_cache: dict[tuple[int, str], str] = {}
         self.training_notes: list[str] = []
@@ -104,6 +113,7 @@ class HangmanTreeBuilder:
             remaining_lives=self.config.max_lives,
             depth=0,
             forced_letter=forced_root_letter,
+            reserved_slots=0,
         )
         training_seconds = time.perf_counter() - started
         strategy = self.config.strategy
@@ -138,15 +148,99 @@ class HangmanTreeBuilder:
         )
         return tree
 
+    def build_from_state(
+        self,
+        *,
+        candidates: tuple[str, ...] | list[str],
+        pattern: str,
+        guessed_letters: frozenset[str] | set[str] | tuple[str, ...] | list[str],
+        incorrect_letters: frozenset[str] | set[str] | tuple[str, ...] | list[str],
+        remaining_lives: int,
+        depth: int,
+        root_node_id: int | None = None,
+    ) -> HangmanDecisionTree:
+        if len(pattern) != self.config.length:
+            raise ValueError("Subtree pattern length does not match TreeBuildConfig length.")
+        if root_node_id is not None:
+            if root_node_id < 0:
+                raise ValueError("root_node_id must be non-negative.")
+            self._next_node_id = root_node_id
+            self._reserved_node_ids.discard(root_node_id)
+
+        started = time.perf_counter()
+        unknown_words = sorted(set(candidates) - set(self.word_index))
+        if unknown_words:
+            raise ValueError(f"Subtree candidates are not present in the builder vocabulary: {unknown_words[:3]}")
+        candidate_ids = tuple(self.word_index[word] for word in sorted(set(candidates)))
+        guessed = frozenset(guessed_letters)
+        incorrect = frozenset(incorrect_letters)
+        if not incorrect.issubset(guessed):
+            raise ValueError("Incorrect letters must also be present in guessed_letters.")
+
+        root_id = self._build_node(
+            candidates=candidate_ids,
+            pattern=pattern,
+            guessed=guessed,
+            incorrect=incorrect,
+            remaining_lives=remaining_lives,
+            depth=depth,
+            reserved_slots=0,
+        )
+        training_seconds = time.perf_counter() - started
+        strategy = self.config.strategy
+        if strategy == "exact" and len(candidate_ids) > self.config.exact_candidate_limit:
+            strategy = "near-exact"
+            self._add_training_note(
+                f"Exact optimization was not attempted above {self.config.exact_candidate_limit} candidates."
+            )
+        return HangmanDecisionTree(
+            length=self.config.length,
+            objective=TreeObjective(
+                max_lives=self.config.max_lives,
+                weighting=self.config.weighting,
+            ),
+            strategy=strategy,  # type: ignore[arg-type]
+            root_id=root_id,
+            nodes=self.nodes,
+            metadata={
+                "training_seconds": training_seconds,
+                "word_count": len(candidate_ids),
+                "profile": self.config.profile,
+                "requested_strategy": self.config.strategy,
+                "lookahead": self.config.lookahead,
+                "node_budget": self.config.node_budget,
+                "max_depth": self.config.max_depth,
+                "lookahead_candidate_limit": self.config.lookahead_candidate_limit,
+                "exact_candidate_limit": self.config.exact_candidate_limit,
+                "pruning_min_gain": self.config.pruning_min_gain,
+                "weighting": self.config.weighting,
+                "training_notes": self.training_notes,
+                "root_pattern": pattern,
+                "root_guessed_letters": sorted(guessed),
+                "root_incorrect_letters": sorted(incorrect),
+                "root_remaining_lives": remaining_lives,
+                "root_depth": depth,
+            },
+        )
+
     def _word_weight(self, word: str, weights: dict[str, float] | None) -> float:
         if self.config.weighting == "uniform" or not weights:
             return 1.0
         return max(float(weights.get(word, 1.0)), 0.0)
 
     def _new_node_id(self) -> int:
+        while self._next_node_id in self._reserved_node_ids:
+            self._next_node_id += 1
         node_id = self._next_node_id
         self._next_node_id += 1
         return node_id
+
+    def _can_allocate(self, node_count: int, reserved_slots: int) -> bool:
+        return len(self.nodes) + node_count <= self.config.node_budget - reserved_slots
+
+    def _add_training_note(self, note: str) -> None:
+        if note not in self.training_notes:
+            self.training_notes.append(note)
 
     def _state_hash(self, candidates: tuple[int, ...]) -> str:
         digest = hashlib.blake2b(digest_size=12)
@@ -169,22 +263,11 @@ class HangmanTreeBuilder:
         remaining_lives: int,
         depth: int,
         forced_letter: str | None = None,
+        reserved_slots: int = 0,
     ) -> int:
+        if not self._can_allocate(1, reserved_slots):
+            raise RuntimeError("Node budget exhausted before reserving required tree branches.")
         node_id = self._new_node_id()
-        if len(self.nodes) >= self.config.node_budget:
-            self.training_notes.append("Node budget reached; budget leaves use stored fallback letter order.")
-            node = self._make_leaf(
-                node_id,
-                depth,
-                pattern,
-                guessed,
-                incorrect,
-                remaining_lives,
-                candidates,
-                "budget",
-            )
-            self.nodes[node_id] = node
-            return node_id
 
         terminal_leaf = self._terminal_leaf_type(pattern, candidates, remaining_lives, guessed)
         if terminal_leaf:
@@ -230,6 +313,24 @@ class HangmanTreeBuilder:
             self.nodes[node_id] = node
             return node_id
 
+        partitions = self._partition(candidates, letter)
+        if not self._can_allocate(1 + len(partitions), reserved_slots):
+            self._add_training_note(
+                "Node budget reached; expandable budget leaves preserve the exact Hangman state."
+            )
+            node = self._make_leaf(
+                node_id,
+                depth,
+                pattern,
+                guessed,
+                incorrect,
+                remaining_lives,
+                candidates,
+                "budget",
+            )
+            self.nodes[node_id] = node
+            return node_id
+
         if self.config.pruning_min_gain > 0 and forced_letter is None:
             fallback_stats = self._leaf_stats(
                 pattern,
@@ -251,8 +352,7 @@ class HangmanTreeBuilder:
                     f"Pruned nodes whose immediate win-rate gain was below "
                     f"{self.config.pruning_min_gain}."
                 )
-                if note not in self.training_notes:
-                    self.training_notes.append(note)
+                self._add_training_note(note)
                 node = self._make_leaf(
                     node_id,
                     depth,
@@ -280,13 +380,14 @@ class HangmanTreeBuilder:
         )
         self.nodes[node_id] = node
 
-        partitions = self._partition(candidates, letter)
+        partition_items = sorted(partitions.items())
         branch_stats: list[tuple[float, TreeStats]] = []
-        for outcome_pattern, child_candidates in sorted(partitions.items()):
+        for index, (outcome_pattern, child_candidates) in enumerate(partition_items):
             is_miss = "1" not in outcome_pattern
             child_lives = remaining_lives - 1 if is_miss else remaining_lives
             child_pattern = apply_outcome(pattern, letter, outcome_pattern)
             child_incorrect = incorrect | frozenset({letter}) if is_miss else incorrect
+            sibling_slots = len(partition_items) - index - 1
             child_id = self._build_node(
                 candidates=child_candidates,
                 pattern=child_pattern,
@@ -294,6 +395,7 @@ class HangmanTreeBuilder:
                 incorrect=child_incorrect,
                 remaining_lives=child_lives,
                 depth=depth + 1,
+                reserved_slots=reserved_slots + sibling_slots,
             )
             probability = self._candidate_weight(child_candidates) / max(self._candidate_weight(candidates), 1e-12)
             branch = BranchInfo(

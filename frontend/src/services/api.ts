@@ -49,6 +49,18 @@ export function fetchTreeNode(length: number, nodeId: number, weighting = "unifo
   return request<TreeNodeResponse>(`/trees/${length}/node/${nodeId}?weighting=${encodeURIComponent(weighting)}`);
 }
 
+export function expandTreeNode(
+  length: number,
+  nodeId: number,
+  weighting = "uniform",
+  nodeBudget = 20000
+): Promise<TreeNodeResponse> {
+  return request<TreeNodeResponse>(`/trees/${length}/node/${nodeId}/expand?weighting=${encodeURIComponent(weighting)}`, {
+    method: "POST",
+    body: JSON.stringify({ node_budget: nodeBudget })
+  });
+}
+
 export function fetchRootAnalysis(length: number, weighting = "uniform"): Promise<RootAnalysisRow[]> {
   return request<RootAnalysisRow[]>(`/trees/${length}/root-analysis?weighting=${encodeURIComponent(weighting)}`);
 }

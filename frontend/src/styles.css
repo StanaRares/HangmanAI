@@ -557,6 +557,45 @@ button:focus-visible {
   color: var(--text);
 }
 
+.checkpoint-copy {
+  margin-top: 28px;
+}
+
+.checkpoint-copy h2 {
+  max-width: 360px;
+  margin: 14px 0 22px;
+  color: var(--text);
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 2.5rem;
+  font-weight: 400;
+  line-height: 1.04;
+}
+
+.checkpoint-copy dl {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 10px 18px;
+  margin: 0 0 24px;
+}
+
+.checkpoint-copy dt {
+  color: var(--muted);
+}
+
+.checkpoint-copy dd {
+  margin: 0;
+  color: var(--text);
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.checkpoint-copy button {
+  border: 0;
+  border-bottom: 1px solid var(--accent);
+  background: transparent;
+  color: var(--accent);
+  padding: 8px 0;
+}
+
 .node-stats {
   border-top: 1px solid var(--line);
   padding-top: 18px;
@@ -911,6 +950,7 @@ blockquote {
   }
 
   .info-list dl,
+  .checkpoint-copy dl,
   .branch-list button,
   .root-row,
   .research-block {

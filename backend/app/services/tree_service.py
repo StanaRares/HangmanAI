@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import random
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -15,14 +17,21 @@ from app.core.dictionary import PROJECT_ROOT, clean_word
 from app.core.environment import HangmanEnvironment
 from app.core.state import GameState
 from app.tree.builder import HangmanTreeBuilder, TreeBuildConfig
-from app.tree.model import HangmanDecisionTree, canonical_state_key
-from app.tree.serialization import load_tree
+from app.tree.model import HangmanDecisionTree, TreeNode, canonical_state_key
+from app.tree.serialization import load_tree, save_tree_atomic
 from app.tree.vocabulary import (
     load_vocabulary_frame,
     vocabulary_summary,
     weights_for_length,
     words_for_length,
 )
+
+
+EXPANDABLE_LEAF_TYPES = {"budget", "depth_limited"}
+
+
+class ExpansionInProgressError(RuntimeError):
+    """Raised when a tree node expansion is already running."""
 
 
 @dataclass
@@ -58,6 +67,8 @@ class TreeGameService:
         self.games: dict[str, TreeGameSession] = {}
         self._tree_cache: dict[tuple[int, str], HangmanDecisionTree] = {}
         self._ephemeral_cache: dict[tuple[int, str], HangmanDecisionTree] = {}
+        self._expansion_locks: dict[tuple[int, str, int], threading.Lock] = {}
+        self._expansion_locks_guard = threading.Lock()
 
     def health(self) -> dict[str, Any]:
         trained = self.list_trees()
@@ -98,6 +109,7 @@ class TreeGameService:
     def node_payload(self, length: int, node_id: int, weighting: str = "uniform") -> dict[str, Any]:
         tree = self.load_tree(length, weighting)
         node = tree.get_node(node_id)
+        reconstructed_candidates = self.reconstruct_node_candidates(length, node)
         payload = node.to_dict()
         payload["state_key"] = canonical_state_key(
             length=length,
@@ -105,13 +117,112 @@ class TreeGameService:
             guessed_letters=node.guessed_letters,
             incorrect_letters=node.incorrect_letters,
             remaining_lives=node.remaining_lives,
-            candidates=node.candidate_sample,
+            candidates=reconstructed_candidates,
         )
+        payload["reconstructed_candidate_count"] = len(reconstructed_candidates)
+        payload["candidate_count_mismatch"] = len(reconstructed_candidates) != node.candidate_count
+        payload["expandable"] = self._is_expandable_node(node)
+        payload["extension_loaded"] = self._extension_path(length, weighting, node_id).exists() and node.guess is not None
         payload["branches"] = sorted(
             (branch.to_dict() for branch in node.branches.values()),
             key=lambda branch: (-float(branch["probability"]), str(branch["outcome_pattern"])),
         )
         return payload
+
+    def expand_node(
+        self,
+        length: int,
+        node_id: int,
+        weighting: str = "uniform",
+        node_budget: int = 20000,
+        profile: str = "fast",
+    ) -> dict[str, Any]:
+        lock = self._expansion_lock(length, weighting, node_id)
+        if not lock.acquire(blocking=False):
+            raise ExpansionInProgressError(f"Expansion for node {node_id} is already in progress.")
+        file_lock_path: Path | None = None
+        try:
+            file_lock_path = self._acquire_expansion_file_lock(length, weighting, node_id)
+            if file_lock_path is None:
+                raise ExpansionInProgressError(f"Expansion for node {node_id} is already in progress.")
+            tree = self.load_tree(length, weighting)
+            extension_path = self._extension_path(length, weighting, node_id)
+            node = tree.get_node(node_id)
+            if node.guess is None and extension_path.exists():
+                self._load_extensions(tree, length, weighting)
+                node = tree.get_node(node_id)
+            if node.guess is not None:
+                payload = self.node_payload(length, node_id, weighting)
+                payload["expanded"] = False
+                payload["already_expanded"] = True
+                return payload
+            if not self._is_expandable_node(node):
+                raise ValueError(f"Node {node_id} is not a budget/depth-limited expandable checkpoint.")
+
+            reconstructed_candidates = self.reconstruct_node_candidates(length, node)
+            if len(reconstructed_candidates) != node.candidate_count:
+                raise ValueError(
+                    "Reconstructed candidate count "
+                    f"{len(reconstructed_candidates)} does not match stored node count {node.candidate_count}."
+                )
+            if not reconstructed_candidates:
+                raise ValueError(f"Node {node_id} has no reconstructable candidates to expand.")
+
+            try:
+                config = TreeBuildConfig.from_profile(
+                    length=length,
+                    profile=profile,  # type: ignore[arg-type]
+                    max_lives=tree.objective.max_lives,
+                    weighting=weighting,  # type: ignore[arg-type]
+                    node_budget=node_budget,
+                )
+            except KeyError as exc:
+                raise ValueError(f"Unknown expansion profile: {profile}") from exc
+            config = replace(config, max_depth=node.depth + config.max_depth)
+            weights = weights_for_length(self.frame, length) if weighting == "wordfreq" else None
+            reserved_node_ids = set(tree.nodes)
+            reserved_node_ids.discard(node_id)
+            builder = HangmanTreeBuilder(
+                words_for_length(self.frame, length),
+                weights=weights,
+                config=config,
+                start_node_id=node_id,
+                reserved_node_ids=reserved_node_ids,
+            )
+            extension = builder.build_from_state(
+                candidates=reconstructed_candidates,
+                pattern=node.pattern,
+                guessed_letters=node.guessed_letters,
+                incorrect_letters=node.incorrect_letters,
+                remaining_lives=node.remaining_lives,
+                depth=node.depth,
+                root_node_id=node_id,
+            )
+            root = extension.get_node(extension.root_id)
+            if root.guess is None:
+                raise ValueError(
+                    f"Expansion budget {node_budget} was not large enough to create a decision node."
+                )
+            extension.metadata["extends_node_id"] = node_id
+            extension.metadata["base_tree_length"] = length
+            extension.metadata["base_tree_weighting"] = weighting
+            extension.metadata["reconstructed_candidate_count"] = len(reconstructed_candidates)
+
+            save_tree_atomic(extension, extension_path)
+            self._merge_extension(tree, extension, extension_path)
+            payload = self.node_payload(length, node_id, weighting)
+            payload["expanded"] = True
+            payload["already_expanded"] = False
+            payload["extension_path"] = str(extension_path)
+            payload["extension_node_count"] = extension.node_count
+            return payload
+        finally:
+            if file_lock_path is not None:
+                try:
+                    file_lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+            lock.release()
 
     def root_analysis(self, length: int, weighting: str = "uniform") -> list[dict[str, Any]]:
         path = PROJECT_ROOT / "reports" / "results" / "root_letter_analysis" / f"length_{length}_{weighting}.csv"
@@ -260,7 +371,22 @@ class TreeGameService:
             if not path.exists():
                 raise FileNotFoundError(f"No serialized {length}-letter {weighting} tree found at {path}.")
             self._tree_cache[key] = load_tree(path)
-        return self._tree_cache[key]
+        tree = self._tree_cache[key]
+        self._load_extensions(tree, length, weighting)
+        return tree
+
+    def reconstruct_node_candidates(self, length: int, node: TreeNode) -> tuple[str, ...]:
+        pattern_letters = frozenset(letter for letter in node.pattern if letter != "_")
+        guessed_letters = frozenset(node.guessed_letters) | frozenset(node.incorrect_letters) | pattern_letters
+        state = GameState(
+            word_length=length,
+            pattern=node.pattern,
+            guessed_letters=guessed_letters,
+            incorrect_letters=frozenset(node.incorrect_letters),
+            remaining_lives=node.remaining_lives,
+            max_lives=max(node.remaining_lives, 1),
+        )
+        return self.index.candidates(state)
 
     def _default_play_length(self, weighting: str) -> int:
         trained = [row["length"] for row in self.list_trees() if row["weighting"] == weighting]
@@ -274,6 +400,81 @@ class TreeGameService:
 
     def _tree_path(self, length: int, weighting: str) -> Path:
         return self.models_dir / f"length_{length}" / weighting / "tree.json.gz"
+
+    def _extension_dir(self, length: int, weighting: str) -> Path:
+        return self.models_dir / f"length_{length}" / weighting / "extensions"
+
+    def _extension_path(self, length: int, weighting: str, node_id: int) -> Path:
+        return self._extension_dir(length, weighting) / f"node_{node_id}.json.gz"
+
+    def _is_expandable_node(self, node: TreeNode) -> bool:
+        return (
+            node.guess is None
+            and node.leaf_type in EXPANDABLE_LEAF_TYPES
+            and node.remaining_lives > 0
+            and "_" in node.pattern
+            and node.candidate_count > 1
+        )
+
+    def _expansion_lock(self, length: int, weighting: str, node_id: int) -> threading.Lock:
+        key = (length, weighting, node_id)
+        with self._expansion_locks_guard:
+            if key not in self._expansion_locks:
+                self._expansion_locks[key] = threading.Lock()
+            return self._expansion_locks[key]
+
+    def _acquire_expansion_file_lock(self, length: int, weighting: str, node_id: int) -> Path | None:
+        extension_path = self._extension_path(length, weighting, node_id)
+        lock_path = extension_path.with_name(f"{extension_path.name}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return None
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+        return lock_path
+
+    def _load_extensions(self, tree: HangmanDecisionTree, length: int, weighting: str) -> None:
+        extension_dir = self._extension_dir(length, weighting)
+        if not extension_dir.exists():
+            return
+        loaded = set(tree.metadata.setdefault("loaded_extensions", []))
+        for path in sorted(extension_dir.glob("node_*.json.gz")):
+            path_key = str(path)
+            if path_key in loaded:
+                continue
+            extension = load_tree(path)
+            self._merge_extension(tree, extension, path)
+            loaded.add(path_key)
+        tree.metadata["loaded_extensions"] = sorted(loaded)
+
+    def _merge_extension(self, tree: HangmanDecisionTree, extension: HangmanDecisionTree, path: Path) -> None:
+        root = extension.get_node(extension.root_id)
+        if root.node_id not in tree.nodes:
+            raise KeyError(f"Extension root node {root.node_id} does not exist in the base tree.")
+        existing = tree.nodes[root.node_id]
+        if (
+            existing.pattern != root.pattern
+            or tuple(existing.guessed_letters) != tuple(root.guessed_letters)
+            or tuple(existing.incorrect_letters) != tuple(root.incorrect_letters)
+            or existing.remaining_lives != root.remaining_lives
+        ):
+            raise ValueError(f"Extension {path} does not match the base node state.")
+        for extension_node_id, extension_node in extension.nodes.items():
+            if extension_node_id in tree.nodes and extension_node_id != root.node_id:
+                existing_payload = tree.nodes[extension_node_id].to_dict()
+                if existing_payload != extension_node.to_dict():
+                    raise ValueError(f"Extension {path} conflicts with existing node {extension_node_id}.")
+        tree.nodes.update(extension.nodes)
+        extensions = dict(tree.metadata.setdefault("extensions", {}))
+        extensions[str(root.node_id)] = {
+            "path": str(path),
+            "node_count": extension.node_count,
+            "training_seconds": extension.metadata.get("training_seconds"),
+            "node_budget": extension.metadata.get("node_budget"),
+        }
+        tree.metadata["extensions"] = extensions
 
     def _tree_files_payload(self, length: int, weighting: str, model_path: Path) -> dict[str, Any]:
         model_dir = model_path.parent

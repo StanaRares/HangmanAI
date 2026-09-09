@@ -15,6 +15,7 @@ import { HangmanFigure } from "./components/HangmanFigure";
 import { LetterKeyboard } from "./components/LetterKeyboard";
 import {
   createGame,
+  expandTreeNode,
   fetchHealth,
   fetchResultsByLength,
   fetchRootAnalysis,
@@ -79,6 +80,21 @@ function singleLetter(value: string | undefined | null) {
 
 function guessDisplay(value: string | undefined | null, fallback = "fixed") {
   return singleLetter(value)?.toUpperCase() ?? fallback;
+}
+
+function isCheckpointNode(node: TreeNodeResponse) {
+  return node.guess === null && node.expandable && (node.leaf_type === "budget" || node.leaf_type === "depth_limited");
+}
+
+function checkpointReason(node: TreeNodeResponse) {
+  return node.leaf_type === "budget"
+    ? "This branch reached the construction budget."
+    : "This branch reached the configured depth limit.";
+}
+
+function terminalLabel(node: TreeNodeResponse) {
+  if (node.leaf_type === "deterministic") return "fixed";
+  return node.leaf_type ?? "terminal";
 }
 
 function patternDisplay(pattern: string | undefined) {
@@ -308,6 +324,21 @@ function App() {
     setNodePath([treeSummary.root.node_id]);
   }
 
+  async function expandCurrentNode() {
+    if (!treeNode?.expandable) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const expanded = await expandTreeNode(selectedLength, treeNode.node_id);
+      setTreeNode(expanded);
+      setNodePath((current) => (current[current.length - 1] === expanded.node_id ? current : [...current, expanded.node_id]));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not expand branch");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   const decisionHistory = game?.decisions ?? [];
   const currentDecision = game?.decision ?? decisionHistory[decisionHistory.length - 1];
   const featuredGuess = currentDecision?.guess ?? singleLetter(playStats?.best_first_guess);
@@ -465,11 +496,39 @@ function App() {
 
           {treeNode ? (
             <div className="tree-composition">
-              <section className="node-sheet">
+              <section className={`node-sheet ${isCheckpointNode(treeNode) ? "checkpoint-node" : ""}`}>
                 <span>Node {nodeLabel(treeNode.node_id)}</span>
-                <p>Guess</p>
-                <strong>{treeNode.guess ? treeNode.guess.toUpperCase() : treeNode.leaf_type}</strong>
-                <code>{patternDisplay(treeNode.pattern)}</code>
+                {treeNode.guess ? (
+                  <>
+                    <p>Guess</p>
+                    <strong>{treeNode.guess.toUpperCase()}</strong>
+                    <code>{patternDisplay(treeNode.pattern)}</code>
+                  </>
+                ) : isCheckpointNode(treeNode) ? (
+                  <div className="checkpoint-copy">
+                    <p>Tree checkpoint</p>
+                    <h2>{checkpointReason(treeNode)}</h2>
+                    <dl>
+                      <dt>Pattern</dt>
+                      <dd>
+                        <code>{patternDisplay(treeNode.pattern)}</code>
+                      </dd>
+                      <dt>Candidates</dt>
+                      <dd>{integer(treeNode.reconstructed_candidate_count)}</dd>
+                      <dt>Lives</dt>
+                      <dd>{treeNode.remaining_lives}</dd>
+                    </dl>
+                    <button type="button" onClick={() => void expandCurrentNode()} disabled={loading}>
+                      Expand this branch
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <p>Terminal outcome</p>
+                    <strong>{terminalLabel(treeNode)}</strong>
+                    <code>{patternDisplay(treeNode.pattern)}</code>
+                  </>
+                )}
               </section>
 
               <section className="info-list node-stats">
@@ -494,18 +553,26 @@ function App() {
                 <h2>Branches</h2>
                 <div className="path-strip">{nodePath.map((node) => nodeLabel(node)).join(" / ")}</div>
                 <div className="branch-list">
-                  {treeNode.branches.map((branch) => (
-                    <button
-                      key={`${branch.outcome_pattern}-${branch.node_id}`}
-                      type="button"
-                      onClick={() => void loadNode(branch)}
-                      disabled={branch.node_id === null || loading}
-                    >
-                      <code>{branch.outcome_pattern}</code>
-                      <span>{integer(branch.word_count)} words</span>
-                      <span>{patternDisplay(branch.resulting_pattern)}</span>
-                    </button>
-                  ))}
+                  {treeNode.branches.length ? (
+                    treeNode.branches.map((branch) => (
+                      <button
+                        key={`${branch.outcome_pattern}-${branch.node_id}`}
+                        type="button"
+                        onClick={() => void loadNode(branch)}
+                        disabled={branch.node_id === null || loading}
+                      >
+                        <code>{branch.outcome_pattern}</code>
+                        <span>{integer(branch.word_count)} words</span>
+                        <span>{patternDisplay(branch.resulting_pattern)}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <p className="empty-state">
+                      {treeNode.expandable
+                        ? "Expand this checkpoint to materialize explicit outcome branches."
+                        : "This terminal node has no further outcome branches."}
+                    </p>
+                  )}
                 </div>
               </section>
 

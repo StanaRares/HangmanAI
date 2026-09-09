@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.services.tree_service import TreeGameService
+from app.services.tree_service import ExpansionInProgressError, TreeGameService
 
 
 class NewGameRequest(BaseModel):
@@ -24,6 +24,11 @@ class GuessRequest(BaseModel):
 
 class TreePlayRequest(BaseModel):
     max_steps: int = Field(default=26, ge=1, le=26)
+
+
+class ExpandNodeRequest(BaseModel):
+    node_budget: int = Field(default=20000, ge=2, le=200000)
+    profile: str = "fast"
 
 
 class AiGuessRequest(BaseModel):
@@ -138,6 +143,31 @@ def get_tree_node(length: int, node_id: int, weighting: str = "uniform") -> dict
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/trees/{length}/node/{node_id}/expand")
+def expand_tree_node(
+    length: int,
+    node_id: int,
+    request: ExpandNodeRequest = ExpandNodeRequest(),
+    weighting: str = "uniform",
+) -> dict[str, Any]:
+    try:
+        return get_service().expand_node(
+            length=length,
+            node_id=node_id,
+            weighting=weighting,
+            node_budget=request.node_budget,
+            profile=request.profile,
+        )
+    except ExpansionInProgressError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/game/new")

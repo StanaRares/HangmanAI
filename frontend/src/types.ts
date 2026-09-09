@@ -69,6 +69,14 @@ export type TreeNodeResponse = {
   candidate_sample: string[];
   fallback_letters: string[];
   state_key: string;
+  reconstructed_candidate_count: number;
+  candidate_count_mismatch: boolean;
+  expandable: boolean;
+  extension_loaded: boolean;
+  expanded?: boolean;
+  already_expanded?: boolean;
+  extension_path?: string;
+  extension_node_count?: number;
 };
 
 export type TreeIndexRow = {
