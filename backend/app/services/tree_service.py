@@ -17,7 +17,7 @@ from app.core.dictionary import PROJECT_ROOT, clean_word
 from app.core.environment import HangmanEnvironment
 from app.core.state import GameState
 from app.tree.builder import HangmanTreeBuilder, TreeBuildConfig
-from app.tree.model import HangmanDecisionTree, TreeNode, canonical_state_key
+from app.tree.model import TREE_FORMAT_VERSION, HangmanDecisionTree, TreeNode, canonical_state_key
 from app.tree.serialization import load_tree, save_tree_atomic
 from app.tree.vocabulary import (
     load_vocabulary_frame,
@@ -27,21 +27,23 @@ from app.tree.vocabulary import (
 )
 
 
-EXPANDABLE_LEAF_TYPES = {"budget", "depth_limited"}
-
-
 class ExpansionInProgressError(RuntimeError):
     """Raised when a tree node expansion is already running."""
+
+
+class TreeConsistencyError(RuntimeError):
+    """Raised when the stored tree cannot represent a valid traversal step."""
 
 
 @dataclass
 class TreeGameSession:
     environment: HangmanEnvironment
     tree: HangmanDecisionTree
-    node_id: int
+    node_id: int | None
     weighting: str
     model_source: str
     in_vocabulary: bool
+    tree_position_valid: bool = True
     decisions: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -122,12 +124,28 @@ class TreeGameService:
         payload["reconstructed_candidate_count"] = len(reconstructed_candidates)
         payload["candidate_count_mismatch"] = len(reconstructed_candidates) != node.candidate_count
         payload["expandable"] = self._is_expandable_node(node)
+        payload["is_terminal"] = node.is_terminal
+        payload["is_checkpoint"] = node.is_checkpoint
+        payload["needs_expansion"] = node.needs_expansion
         payload["extension_loaded"] = self._extension_path(length, weighting, node_id).exists() and node.guess is not None
         payload["branches"] = sorted(
             (branch.to_dict() for branch in node.branches.values()),
             key=lambda branch: (-float(branch["probability"]), str(branch["outcome_pattern"])),
         )
         return payload
+
+    def materialized_node_payload(
+        self,
+        length: int,
+        node_id: int,
+        weighting: str = "uniform",
+        node_budget: int = 20000,
+    ) -> dict[str, Any]:
+        tree = self.load_tree(length, weighting)
+        node = tree.get_node(node_id)
+        if self._is_expandable_node(node):
+            self.expand_node(length, node_id, weighting=weighting, node_budget=node_budget)
+        return self.node_payload(length, node_id, weighting)
 
     def expand_node(
         self,
@@ -206,7 +224,9 @@ class TreeGameService:
             extension.metadata["extends_node_id"] = node_id
             extension.metadata["base_tree_length"] = length
             extension.metadata["base_tree_weighting"] = weighting
+            extension.metadata["base_tree_format_version"] = tree.metadata.get("tree_format_version")
             extension.metadata["reconstructed_candidate_count"] = len(reconstructed_candidates)
+            extension.metadata["tree_format_version"] = TREE_FORMAT_VERSION
 
             save_tree_atomic(extension, extension_path)
             self._merge_extension(tree, extension, extension_path)
@@ -268,6 +288,10 @@ class TreeGameService:
         if not bucket:
             raise ValueError(f"No vocabulary bucket is available for {length}-letter words.")
         selected_word = selected or self.rng.choice(bucket)
+        if selected and selected_word not in set(bucket):
+            raise ValueError(
+                "Strict decision-tree play requires a hidden word from the trained vocabulary for that length."
+            )
         environment_words = sorted(set(bucket + [selected_word]))
         environment = HangmanEnvironment(environment_words, max_lives=max_lives, seed=self.rng.randint(0, 10**9))
         state = environment.reset(selected_word)
@@ -287,38 +311,40 @@ class TreeGameService:
             raise KeyError(f"Unknown game_id: {game_id}")
         return self.games[game_id]
 
-    def manual_guess(self, game_id: str, letter: str) -> tuple[GameState, dict[str, Any]]:
+    def manual_guess(self, game_id: str, letter: str) -> tuple[GameState, dict[str, Any] | None]:
         session = self.get_game(game_id)
-        previous = session.node_id
         guess = clean_word(letter)
         if len(guess) != 1:
             raise ValueError("Guess must be a single letter a-z.")
-        outcome = letter_pattern(session.environment.solution, guess)
-        state = session.environment.step(guess)
-        next_node_id = session.tree.next_node_id(previous, outcome)
-        if next_node_id is not None:
-            session.node_id = next_node_id
-        decision = self._decision_payload(session, previous, guess, outcome, next_node_id)
-        session.decisions.append(decision)
-        return state, decision
+
+        state = session.environment.get_state()
+        if state.is_finished:
+            raise ValueError("Cannot guess after the game has finished.")
+
+        if session.tree_position_valid and session.node_id is not None:
+            node = self.ensure_decision_node(session)
+            if node.guess == guess:
+                return self._advance_tree_decision(session, node, state)
+
+        next_state = session.environment.step(guess)
+        session.node_id = None
+        session.tree_position_valid = False
+        return next_state, None
 
     def tree_step(self, game_id: str) -> tuple[GameState, dict[str, Any]]:
         session = self.get_game(game_id)
         state = session.environment.get_state()
         if state.is_finished:
             raise ValueError("Cannot guess after the game has finished.")
-        previous = session.node_id
-        guess = session.tree.next_guess(previous, state)
-        if guess is None:
-            raise ValueError("Tree has no available guess for this state.")
-        outcome = letter_pattern(session.environment.solution, guess)
-        state = session.environment.step(guess)
-        next_node_id = session.tree.next_node_id(previous, outcome)
-        if next_node_id is not None:
-            session.node_id = next_node_id
-        decision = self._decision_payload(session, previous, guess, outcome, next_node_id)
-        session.decisions.append(decision)
-        return state, decision
+        if not session.in_vocabulary:
+            raise ValueError("Strict decision-tree traversal requires an in-vocabulary hidden word.")
+        if not session.tree_position_valid or session.node_id is None:
+            raise ValueError(
+                "Manual off-policy guesses have left strict tree traversal. Start a new word or let the tree play."
+            )
+
+        node = self.ensure_decision_node(session)
+        return self._advance_tree_decision(session, node, state)
 
     def tree_play(self, game_id: str, max_steps: int = 26) -> tuple[GameState, list[dict[str, Any]]]:
         session = self.get_game(game_id)
@@ -388,6 +414,35 @@ class TreeGameService:
         )
         return self.index.candidates(state)
 
+    def ensure_decision_node(
+        self,
+        session: TreeGameSession,
+        expansion_budget: int = 20000,
+    ) -> TreeNode:
+        if session.node_id is None:
+            raise TreeConsistencyError("Strict tree traversal has no current node.")
+
+        tree = self.load_tree(session.tree.length, session.weighting)
+        session.tree = tree
+        node = tree.get_node(session.node_id)
+        if node.guess is not None:
+            return node
+        if node.is_terminal:
+            return node
+        if self._is_expandable_node(node):
+            self.expand_node(
+                length=session.tree.length,
+                node_id=node.node_id,
+                weighting=session.weighting,
+                node_budget=expansion_budget,
+            )
+            tree = self.load_tree(session.tree.length, session.weighting)
+            session.tree = tree
+            node = tree.get_node(session.node_id)
+            if node.guess is not None or node.is_terminal:
+                return node
+        raise TreeConsistencyError(f"Node {session.node_id} is neither a decision nor a terminal node.")
+
     def _default_play_length(self, weighting: str) -> int:
         trained = [row["length"] for row in self.list_trees() if row["weighting"] == weighting]
         if trained:
@@ -408,13 +463,7 @@ class TreeGameService:
         return self._extension_dir(length, weighting) / f"node_{node_id}.json.gz"
 
     def _is_expandable_node(self, node: TreeNode) -> bool:
-        return (
-            node.guess is None
-            and node.leaf_type in EXPANDABLE_LEAF_TYPES
-            and node.remaining_lives > 0
-            and "_" in node.pattern
-            and node.candidate_count > 1
-        )
+        return node.needs_expansion and node.remaining_lives > 0
 
     def _expansion_lock(self, length: int, weighting: str, node_id: int) -> threading.Lock:
         key = (length, weighting, node_id)
@@ -450,6 +499,18 @@ class TreeGameService:
         tree.metadata["loaded_extensions"] = sorted(loaded)
 
     def _merge_extension(self, tree: HangmanDecisionTree, extension: HangmanDecisionTree, path: Path) -> None:
+        if extension.metadata.get("tree_format_version") != TREE_FORMAT_VERSION:
+            raise ValueError(
+                f"Extension {path} has incompatible tree_format_version "
+                f"{extension.metadata.get('tree_format_version')!r}; expected {TREE_FORMAT_VERSION}."
+            )
+        base_format_version = tree.metadata.get("tree_format_version")
+        if extension.metadata.get("base_tree_format_version") != base_format_version:
+            raise ValueError(
+                f"Extension {path} was built against base tree format "
+                f"{extension.metadata.get('base_tree_format_version')!r}, "
+                f"but the loaded base tree is {base_format_version!r}."
+            )
         root = extension.get_node(extension.root_id)
         if root.node_id not in tree.nodes:
             raise KeyError(f"Extension root node {root.node_id} does not exist in the base tree.")
@@ -509,7 +570,7 @@ class TreeGameService:
         previous_node_id: int,
         guess: str,
         outcome: str,
-        next_node_id: int | None,
+        next_node_id: int,
     ) -> dict[str, Any]:
         node = session.tree.get_node(previous_node_id)
         branch = node.branches.get(outcome)
@@ -519,20 +580,59 @@ class TreeGameService:
             "model_source": session.model_source,
             "node_id": previous_node_id,
             "next_node_id": next_node_id,
-            "branch_found": next_node_id is not None,
+            "branch_found": True,
             "guess": guess,
             "outcome_pattern": outcome,
             "resulting_pattern": session.environment.get_state().pattern,
+            "path_segment": f"{previous_node_id} -{guess.upper()}/{outcome}-> {next_node_id}",
             "node": {
                 "candidate_count": node.candidate_count,
                 "win_probability": node.win_probability,
                 "average_mistakes": node.average_mistakes,
                 "depth": node.depth,
                 "branch_count": len(node.children),
-                "fallback_letters": list(node.fallback_letters[:8]),
             },
-            "branch": branch.to_dict() if branch else {"outcome_pattern": outcome, "node_id": None},
+            "branch": branch.to_dict() if branch else {"outcome_pattern": outcome, "node_id": next_node_id},
         }
+
+    def _advance_tree_decision(
+        self,
+        session: TreeGameSession,
+        node: TreeNode,
+        state: GameState,
+    ) -> tuple[GameState, dict[str, Any]]:
+        if node.guess is None:
+            if node.is_terminal:
+                raise ValueError("Tree traversal reached a terminal node before the game finished.")
+            raise TreeConsistencyError(f"Node {node.node_id} has no explicit decision.")
+        if node.guess in state.guessed_letters:
+            raise TreeConsistencyError(
+                f"Node {node.node_id} guesses '{node.guess}', but that letter is already in the game state."
+            )
+
+        previous = node.node_id
+        outcome = letter_pattern(session.environment.solution, node.guess)
+        next_state = session.environment.step(node.guess)
+        next_node_id = self._require_child_node(session, previous, outcome)
+        session.node_id = next_node_id
+        if not next_state.is_finished:
+            self.ensure_decision_node(session)
+        decision = self._decision_payload(session, previous, node.guess, outcome, next_node_id)
+        session.decisions.append(decision)
+        return next_state, decision
+
+    def _require_child_node(self, session: TreeGameSession, node_id: int, outcome: str) -> int:
+        next_node_id = session.tree.next_node_id(node_id, outcome)
+        if next_node_id is not None:
+            return next_node_id
+
+        self._load_extensions(session.tree, session.tree.length, session.weighting)
+        next_node_id = session.tree.next_node_id(node_id, outcome)
+        if next_node_id is not None:
+            return next_node_id
+        raise TreeConsistencyError(
+            f"Tree node {node_id} has no explicit child branch for observed outcome {outcome}."
+        )
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:

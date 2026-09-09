@@ -102,7 +102,7 @@ function patternDisplay(pattern: string | undefined) {
 }
 
 function nodeLabel(nodeId: number | null | undefined) {
-  if (nodeId === null || typeof nodeId === "undefined") return "fallback";
+  if (nodeId === null || typeof nodeId === "undefined") return "n/a";
   return String(nodeId).padStart(4, "0");
 }
 
@@ -153,6 +153,7 @@ function App() {
   const [nodePath, setNodePath] = useState<number[]>([]);
   const [rootAnalysis, setRootAnalysis] = useState<RootAnalysisRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const trainedLengths = useMemo(
@@ -246,6 +247,7 @@ function App() {
       setError(err instanceof Error ? err.message : "Backend unavailable");
     } finally {
       setLoading(false);
+      setLoadingMessage(null);
     }
   }
 
@@ -261,6 +263,7 @@ function App() {
       setError(err instanceof Error ? err.message : "Could not start game");
     } finally {
       setLoading(false);
+      setLoadingMessage(null);
     }
   }
 
@@ -274,6 +277,7 @@ function App() {
       setError(err instanceof Error ? err.message : "Guess failed");
     } finally {
       setLoading(false);
+      setLoadingMessage(null);
     }
   }
 
@@ -287,6 +291,7 @@ function App() {
       setError(err instanceof Error ? err.message : "Tree step failed");
     } finally {
       setLoading(false);
+      setLoadingMessage(null);
     }
   }
 
@@ -300,21 +305,27 @@ function App() {
       setError(err instanceof Error ? err.message : "Tree play failed");
     } finally {
       setLoading(false);
+      setLoadingMessage(null);
     }
   }
 
   async function loadNode(branch: TreeBranch) {
-    if (branch.node_id === null) return;
+    if (branch.node_id === null) {
+      setError("Tree consistency error: selected branch has no destination node.");
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      const next = await fetchTreeNode(selectedLength, branch.node_id);
+      setLoadingMessage("Materializing subtree...");
+      const next = await fetchTreeNode(selectedLength, branch.node_id, "uniform", true);
       setTreeNode(next);
       setNodePath((current) => [...current, next.node_id]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load node");
     } finally {
       setLoading(false);
+      setLoadingMessage(null);
     }
   }
 
@@ -329,6 +340,7 @@ function App() {
     setLoading(true);
     setError(null);
     try {
+      setLoadingMessage("Materializing subtree...");
       const expanded = await expandTreeNode(selectedLength, treeNode.node_id);
       setTreeNode(expanded);
       setNodePath((current) => (current[current.length - 1] === expanded.node_id ? current : [...current, expanded.node_id]));
@@ -336,6 +348,7 @@ function App() {
       setError(err instanceof Error ? err.message : "Could not expand branch");
     } finally {
       setLoading(false);
+      setLoadingMessage(null);
     }
   }
 
@@ -344,10 +357,7 @@ function App() {
   const featuredGuess = currentDecision?.guess ?? singleLetter(playStats?.best_first_guess);
   const pathText = decisionHistory.length
     ? decisionHistory
-        .map((decision, index) => {
-          const from = index === 0 ? "0000" : nodeLabel(decision.node_id);
-          return `${from} -${decision.guess.toUpperCase()}-> ${nodeLabel(decision.next_node_id)}`;
-        })
+        .map((decision) => `${nodeLabel(decision.node_id)} -${decision.guess.toUpperCase()}/${decision.outcome_pattern}-> ${nodeLabel(decision.next_node_id)}`)
         .join("  ")
     : "0000";
 
@@ -372,6 +382,7 @@ function App() {
       </header>
 
       {error && <div className="error global-error">{error}</div>}
+      {loadingMessage && <div className="loading-banner">{loadingMessage}</div>}
 
       {activeTab === "play" && (
         <section className="play-page">
@@ -458,7 +469,7 @@ function App() {
                 <h2>{currentDecision ? `Why ${currentDecision.guess.toUpperCase()}?` : "Why this letter?"}</h2>
                 <p>
                   {currentDecision
-                    ? `Node ${nodeLabel(currentDecision.node_id)} selects ${currentDecision.guess.toUpperCase()}; the observed branch ${currentDecision.outcome_pattern} leads to ${nodeLabel(currentDecision.next_node_id)}.`
+                    ? `Node ${nodeLabel(currentDecision.node_id)} selects ${currentDecision.guess.toUpperCase()}; the observed branch ${currentDecision.outcome_pattern} leads to node ${nodeLabel(currentDecision.next_node_id)}.`
                     : `The opening node for this length currently favors ${guessDisplay(playStats?.best_first_guess, "a fixed branch")} under the recorded ${playStats?.training_strategy ?? "tree"} policy.`}
                 </p>
               </section>
@@ -507,7 +518,8 @@ function App() {
                 ) : isCheckpointNode(treeNode) ? (
                   <div className="checkpoint-copy">
                     <p>Tree checkpoint</p>
-                    <h2>{checkpointReason(treeNode)}</h2>
+                    <h2>This subtree could not be materialized.</h2>
+                    <p>{checkpointReason(treeNode)}</p>
                     <dl>
                       <dt>Pattern</dt>
                       <dd>
@@ -519,7 +531,7 @@ function App() {
                       <dd>{treeNode.remaining_lives}</dd>
                     </dl>
                     <button type="button" onClick={() => void expandCurrentNode()} disabled={loading}>
-                      Expand this branch
+                      Retry materialization
                     </button>
                   </div>
                 ) : (
@@ -569,7 +581,7 @@ function App() {
                   ) : (
                     <p className="empty-state">
                       {treeNode.expandable
-                        ? "Expand this checkpoint to materialize explicit outcome branches."
+                        ? "This subtree could not be materialized. Retry from the checkpoint panel."
                         : "This terminal node has no further outcome branches."}
                     </p>
                   )}

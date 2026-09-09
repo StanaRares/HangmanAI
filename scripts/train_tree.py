@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +90,18 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def archive_extensions(model_dir: Path) -> None:
+    extension_dir = model_dir / "extensions"
+    if not extension_dir.exists():
+        return
+    if not any(extension_dir.iterdir()):
+        extension_dir.rmdir()
+        return
+    archive = model_dir / f"extensions_backup_{time.strftime('%Y%m%d_%H%M%S')}"
+    shutil.move(str(extension_dir), str(archive))
+    logging.info("Archived stale extension files to %s", archive)
+
+
 def train_tree(args: argparse.Namespace) -> dict[str, Any]:
     frame = load_vocabulary_frame(args.vocabulary)
     words = words_for_length(frame, args.length)
@@ -107,6 +121,7 @@ def train_tree(args: argparse.Namespace) -> dict[str, Any]:
     builder = HangmanTreeBuilder(words, weights, config)
     tree = builder.build()
     model_dir = Path(args.models_dir) / f"length_{args.length}" / args.weighting
+    archive_extensions(model_dir)
     model_path = model_dir / "tree.json.gz"
     save_tree(tree, model_path)
     vocabulary_stats = {

@@ -6,11 +6,14 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 from app.core.candidate_filter import letter_pattern
-from app.core.state import ALPHABET, UNKNOWN, GameState
+from app.core.state import UNKNOWN, GameState
 
 WeightingMode = Literal["uniform", "wordfreq"]
 TreeStrategy = Literal["greedy", "bounded-lookahead", "exact", "near-exact"]
 LeafType = Literal["solved", "loss", "deterministic", "budget", "depth_limited", "exhausted"]
+TREE_FORMAT_VERSION = 2
+TERMINAL_LEAF_TYPES = frozenset({"solved", "loss", "exhausted"})
+CHECKPOINT_LEAF_TYPES = frozenset({"budget", "depth_limited"})
 
 
 @dataclass(frozen=True)
@@ -100,7 +103,25 @@ class TreeNode:
 
     @property
     def is_leaf(self) -> bool:
-        return self.guess is None
+        return self.is_terminal
+
+    @property
+    def is_decision(self) -> bool:
+        return self.guess is not None
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.guess is None and self.leaf_type in TERMINAL_LEAF_TYPES
+
+    @property
+    def is_checkpoint(self) -> bool:
+        return self.guess is None and self.leaf_type in CHECKPOINT_LEAF_TYPES
+
+    @property
+    def needs_expansion(self) -> bool:
+        if self.guess is not None or self.is_terminal:
+            return False
+        return UNKNOWN in self.pattern and self.candidate_count > 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -121,7 +142,6 @@ class TreeNode:
             "average_remaining_lives": self.average_remaining_lives,
             "expected_depth": self.expected_depth,
             "candidate_sample": list(self.candidate_sample),
-            "fallback_letters": list(self.fallback_letters),
         }
 
     @classmethod
@@ -198,12 +218,7 @@ class HangmanDecisionTree:
 
     def next_guess(self, node_id: int, state: GameState) -> str | None:
         node = self.get_node(node_id)
-        if node.guess and node.guess not in state.guessed_letters:
-            return node.guess
-        for letter in node.fallback_letters:
-            if letter not in state.guessed_letters:
-                return letter
-        return next((letter for letter in ALPHABET if letter not in state.guessed_letters), None)
+        return node.guess
 
     def branch_payload(self, node_id: int, outcome_pattern: str) -> dict[str, Any]:
         node = self.get_node(node_id)
@@ -218,6 +233,7 @@ class HangmanDecisionTree:
             "root_id": self.root_id,
             "nodes": {str(node_id): node.to_dict() for node_id, node in self.nodes.items()},
             "metadata": self.metadata,
+            "tree_format_version": self.metadata.get("tree_format_version", TREE_FORMAT_VERSION),
         }
 
     @classmethod

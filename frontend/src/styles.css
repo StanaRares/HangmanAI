@@ -121,6 +121,17 @@ h1,
   color: var(--muted);
 }
 
+.loading-banner {
+  margin: 24px 0 0;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  color: var(--accent);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
 .tree-page,
 .experiments-page,
 .roots-page,

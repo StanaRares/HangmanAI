@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.services.tree_service import ExpansionInProgressError, TreeGameService
+from app.services.tree_service import ExpansionInProgressError, TreeConsistencyError, TreeGameService
 
 
 class NewGameRequest(BaseModel):
@@ -83,6 +83,7 @@ def _game_payload(
             "weighting": session.weighting,
             "model_source": session.model_source,
             "current_node_id": session.node_id,
+            "tree_position_valid": session.tree_position_valid,
             "in_vocabulary": session.in_vocabulary,
             "best_first_guess": session.tree.best_first_guess,
             "node_count": session.tree.node_count,
@@ -136,13 +137,27 @@ def get_root_analysis(length: int, weighting: str = "uniform") -> list[dict[str,
 
 
 @app.get("/trees/{length}/node/{node_id}")
-def get_tree_node(length: int, node_id: int, weighting: str = "uniform") -> dict[str, Any]:
+def get_tree_node(
+    length: int,
+    node_id: int,
+    weighting: str = "uniform",
+    materialize: bool = False,
+    node_budget: int = 20000,
+) -> dict[str, Any]:
     try:
+        if materialize:
+            return get_service().materialized_node_payload(length, node_id, weighting, node_budget)
         return get_service().node_payload(length, node_id, weighting)
+    except ExpansionInProgressError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TreeConsistencyError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/trees/{length}/node/{node_id}/expand")
@@ -168,6 +183,8 @@ def expand_tree_node(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TreeConsistencyError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/game/new")
@@ -204,6 +221,8 @@ def guess(game_id: str, request: GuessRequest) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TreeConsistencyError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/game/{game_id}/tree-step")
@@ -216,6 +235,8 @@ def tree_step(game_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TreeConsistencyError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/game/{game_id}/tree-play")
@@ -228,6 +249,8 @@ def tree_play(game_id: str, request: TreePlayRequest = TreePlayRequest()) -> dic
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TreeConsistencyError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/results/by-length")
@@ -298,6 +321,8 @@ def simulate(request: SimulateRequest) -> dict[str, Any]:
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except TreeConsistencyError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
     wins = sum(1 for result in results if result["status"] == "won")
     return {
         "agent": "hangman_decision_tree",

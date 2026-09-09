@@ -67,11 +67,13 @@ export type TreeNodeResponse = {
   average_remaining_lives: number;
   expected_depth: number;
   candidate_sample: string[];
-  fallback_letters: string[];
   state_key: string;
   reconstructed_candidate_count: number;
   candidate_count_mismatch: boolean;
   expandable: boolean;
+  is_terminal: boolean;
+  is_checkpoint: boolean;
+  needs_expansion: boolean;
   extension_loaded: boolean;
   expanded?: boolean;
   already_expanded?: boolean;
@@ -108,18 +110,18 @@ export type TreeDecision = {
   weighting: string;
   model_source: string;
   node_id: number;
-  next_node_id: number | null;
+  next_node_id: number;
   branch_found: boolean;
   guess: string;
   outcome_pattern: string;
   resulting_pattern: string;
+  path_segment: string;
   node: {
     candidate_count: number;
     win_probability: number;
     average_mistakes: number;
     depth: number;
     branch_count: number;
-    fallback_letters: string[];
   };
   branch: Partial<TreeBranch>;
 };
@@ -128,7 +130,8 @@ export type TreeModelInfo = {
   length: number;
   weighting: string;
   model_source: string;
-  current_node_id: number;
+  current_node_id: number | null;
+  tree_position_valid: boolean;
   in_vocabulary: boolean;
   best_first_guess?: string;
   node_count: number;

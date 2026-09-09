@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app, get_service
+from app.services.tree_service import TreeConsistencyError
+from app.core.state import GameState
+from app.tree.model import BranchInfo
 from app.tree.builder import HangmanTreeBuilder, TreeBuildConfig
 from app.tree.evaluation import evaluate_tree
 from app.tree.serialization import save_tree
@@ -228,3 +232,149 @@ def test_expand_budget_node_persists_and_traverses_after_reload(tmp_path, monkey
     assert reloaded_payload["guess"] == payload["guess"]
     assert reloaded_payload["extension_loaded"] is True
     assert reloaded_payload["branches"]
+
+
+def test_materialized_node_endpoint_auto_expands_checkpoint(tmp_path, monkeypatch) -> None:
+    client, budget_node_id = build_budget_checkpoint_client(tmp_path, monkeypatch)
+
+    response = client.get(f"/trees/5/node/{budget_node_id}?materialize=true")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["node_id"] == budget_node_id
+    assert payload["guess"] is not None
+    assert len(payload["guess"]) == 1
+    assert payload["leaf_type"] is None
+    assert payload["branches"]
+    assert payload["expandable"] is False
+    assert payload["needs_expansion"] is False
+
+
+def test_tree_step_auto_materializes_checkpoint_and_never_records_fallback(tmp_path, monkeypatch) -> None:
+    client, budget_node_id = build_budget_checkpoint_client(tmp_path, monkeypatch)
+
+    response = client.post("/game/new", json={"word": "bacca", "max_lives": 6})
+    assert response.status_code == 200
+    game_id = response.json()["game_id"]
+
+    response = client.post(f"/game/{game_id}/tree-step")
+    assert response.status_code == 200
+    payload = response.json()
+    decision = payload["decision"]
+    assert decision["guess"] == "a"
+    assert decision["next_node_id"] == budget_node_id
+    assert "fallback" not in decision["path_segment"].lower()
+    assert payload["model"]["current_node_id"] == budget_node_id
+    assert payload["model"]["tree_position_valid"] is True
+
+    materialized = client.get(f"/trees/5/node/{budget_node_id}")
+    assert materialized.status_code == 200
+    node = materialized.json()
+    assert node["guess"] is not None
+    assert node["branches"]
+    assert node["leaf_type"] is None
+
+    response = client.post(f"/game/{game_id}/tree-step")
+    assert response.status_code == 200
+    next_decision = response.json()["decision"]
+    assert next_decision["node_id"] == budget_node_id
+    assert next_decision["next_node_id"] is not None
+    assert "fallback" not in next_decision["path_segment"].lower()
+
+
+def test_materialized_extension_loads_after_service_restart_without_rewriting(tmp_path, monkeypatch) -> None:
+    client, budget_node_id = build_budget_checkpoint_client(tmp_path, monkeypatch)
+    response = client.get(f"/trees/5/node/{budget_node_id}?materialize=true")
+    assert response.status_code == 200
+    first = response.json()
+    extension_path = tmp_path / "models" / "length_5" / "uniform" / "extensions" / f"node_{budget_node_id}.json.gz"
+    before_mtime = extension_path.stat().st_mtime_ns
+
+    get_service.cache_clear()
+    reloaded_client = TestClient(app)
+    response = reloaded_client.get(f"/trees/5/node/{budget_node_id}?materialize=true")
+
+    assert response.status_code == 200
+    reloaded = response.json()
+    assert reloaded["guess"] == first["guess"]
+    assert reloaded["branches"]
+    assert extension_path.stat().st_mtime_ns == before_mtime
+
+
+def test_nested_checkpoints_are_materialized_lazily(tmp_path, monkeypatch) -> None:
+    words = ["apple"]
+    frame = pd.DataFrame(
+        {
+            "word": words,
+            "length": [5],
+            "zipf_frequency": [3.0],
+        }
+    )
+    vocabulary_path = tmp_path / "vocabulary.parquet"
+    frame.to_parquet(vocabulary_path, index=False)
+
+    config = TreeBuildConfig.from_profile(length=5, profile="fast", node_budget=1)
+    tree = HangmanTreeBuilder(words, config=config).build_from_state(
+        candidates=("apple",),
+        pattern="a___e",
+        guessed_letters=frozenset({"a", "e"}),
+        incorrect_letters=frozenset(),
+        remaining_lives=6,
+        depth=3,
+        root_node_id=500,
+    )
+    model_path = tmp_path / "models" / "length_5" / "uniform" / "tree.json.gz"
+    save_tree(tree, model_path)
+    monkeypatch.setenv("HANGMAN_VOCABULARY", str(vocabulary_path))
+    monkeypatch.setenv("HANGMAN_MODELS_DIR", str(tmp_path / "models"))
+    get_service.cache_clear()
+    client = TestClient(app)
+
+    root_response = client.get("/trees/5/node/500?materialize=true&node_budget=2")
+    assert root_response.status_code == 200
+    root = root_response.json()
+    assert root["guess"] == "p"
+    child_id = root["branches"][0]["node_id"]
+    child_raw = client.get(f"/trees/5/node/{child_id}")
+    assert child_raw.status_code == 200
+    assert child_raw.json()["needs_expansion"] is True
+
+    child_response = client.get(f"/trees/5/node/{child_id}?materialize=true&node_budget=2")
+    assert child_response.status_code == 200
+    child = child_response.json()
+    assert child["guess"] == "l"
+    assert child["branches"]
+    assert child["needs_expansion"] is False
+
+
+def test_corrupt_missing_branch_fails_loudly(tmp_path, monkeypatch) -> None:
+    client = build_test_client(tmp_path, monkeypatch)
+    response = client.post("/game/new", json={"word": "cat", "max_lives": 6})
+    assert response.status_code == 200
+    game_id = response.json()["game_id"]
+    service = get_service()
+    session = service.get_game(game_id)
+    root = session.tree.root
+    outcome = "010" if root.guess == "a" else "".join("1" if char == root.guess else "0" for char in "cat")
+    root.children.pop(outcome, None)
+    root.branches.pop(outcome, None)
+
+    with pytest.raises(TreeConsistencyError):
+        service.tree_step(game_id)
+
+
+def test_manual_off_policy_guess_does_not_corrupt_tree_path(tmp_path, monkeypatch) -> None:
+    client = build_test_client(tmp_path, monkeypatch)
+    response = client.post("/game/new", json={"word": "cat", "max_lives": 6})
+    assert response.status_code == 200
+    game_id = response.json()["game_id"]
+    first_guess = response.json()["model"]["best_first_guess"]
+    off_policy = "z" if first_guess != "z" else "q"
+
+    response = client.post(f"/game/{game_id}/guess", json={"letter": off_policy})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model"]["tree_position_valid"] is False
+    assert payload["model"]["current_node_id"] is None
+    assert payload["decisions"] == []

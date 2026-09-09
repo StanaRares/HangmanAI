@@ -94,6 +94,47 @@ def test_subtree_build_starts_from_exact_budget_leaf_state() -> None:
     assert all(branch.node_id in subtree.nodes for branch in root.branches.values())
 
 
+def test_next_guess_never_falls_back_from_checkpoint() -> None:
+    tree = HangmanTreeBuilder(
+        ["babka", "bacca", "cabal", "sissy"],
+        config=config(5, node_budget=4),
+    ).build(forced_root_letter="a")
+    budget_node = next(node for node in tree.nodes.values() if node.leaf_type == "budget")
+    state = GameState(
+        word_length=5,
+        pattern=budget_node.pattern,
+        guessed_letters=frozenset(budget_node.guessed_letters),
+        incorrect_letters=frozenset(budget_node.incorrect_letters),
+        remaining_lives=budget_node.remaining_lives,
+        max_lives=6,
+    )
+
+    assert tree.next_guess(budget_node.node_id, state) is None
+
+
+def test_single_candidate_state_materializes_explicit_guess_chain() -> None:
+    tree = HangmanTreeBuilder(["apple"], config=config(5, node_budget=20)).build_from_state(
+        candidates=("apple",),
+        pattern="a___e",
+        guessed_letters=frozenset({"a", "e"}),
+        incorrect_letters=frozenset(),
+        remaining_lives=6,
+        depth=3,
+        root_node_id=500,
+    )
+    root = tree.root
+    p_child = tree.get_node(root.children["01100"])
+    solved = tree.get_node(p_child.children["00010"])
+
+    assert root.node_id == 500
+    assert root.guess == "p"
+    assert root.leaf_type is None
+    assert p_child.guess == "l"
+    assert p_child.leaf_type is None
+    assert solved.is_terminal
+    assert solved.leaf_type == "solved"
+
+
 def test_equivalent_states_hash_identically() -> None:
     left = canonical_state_key(
         length=5,

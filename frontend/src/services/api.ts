@@ -45,8 +45,10 @@ export function fetchTreeSummary(length: number, weighting = "uniform"): Promise
   return request<TreeSummaryResponse>(`/trees/${length}?weighting=${encodeURIComponent(weighting)}`);
 }
 
-export function fetchTreeNode(length: number, nodeId: number, weighting = "uniform"): Promise<TreeNodeResponse> {
-  return request<TreeNodeResponse>(`/trees/${length}/node/${nodeId}?weighting=${encodeURIComponent(weighting)}`);
+export function fetchTreeNode(length: number, nodeId: number, weighting = "uniform", materialize = false): Promise<TreeNodeResponse> {
+  const params = new URLSearchParams({ weighting });
+  if (materialize) params.set("materialize", "true");
+  return request<TreeNodeResponse>(`/trees/${length}/node/${nodeId}?${params.toString()}`);
 }
 
 export function expandTreeNode(

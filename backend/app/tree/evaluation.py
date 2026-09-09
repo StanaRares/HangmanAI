@@ -55,15 +55,17 @@ def evaluate_tree_on_word(
         guess = tree.next_guess(node_id, state)
         if guess is None:
             break
+        if guess in state.guessed_letters:
+            raise ValueError(f"Tree node {node_id} repeated already-guessed letter '{guess}'.")
         guesses.append(guess)
         previous_node_id = node_id
         state = environment.step(guess)
         outcome = letter_pattern(word, guess)
         next_node_id = tree.next_node_id(previous_node_id, outcome)
         if next_node_id is None:
-            node = tree.get_node(previous_node_id)
-            candidate_counts.append(node.candidate_count)
-            continue
+            raise ValueError(
+                f"Tree node {previous_node_id} has no explicit child for outcome {outcome} while evaluating {word}."
+            )
         node_id = next_node_id
         node_sequence.append(node_id)
         candidate_counts.append(tree.get_node(node_id).candidate_count)

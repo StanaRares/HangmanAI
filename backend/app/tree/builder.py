@@ -11,6 +11,7 @@ from app.core.state import ALPHABET, UNKNOWN
 from app.tree.model import (
     BranchInfo,
     HangmanDecisionTree,
+    TREE_FORMAT_VERSION,
     TreeNode,
     TreeObjective,
     TreeStats,
@@ -143,6 +144,7 @@ class HangmanTreeBuilder:
                 "exact_candidate_limit": self.config.exact_candidate_limit,
                 "pruning_min_gain": self.config.pruning_min_gain,
                 "weighting": self.config.weighting,
+                "tree_format_version": TREE_FORMAT_VERSION,
                 "training_notes": self.training_notes,
             },
         )
@@ -214,6 +216,7 @@ class HangmanTreeBuilder:
                 "exact_candidate_limit": self.config.exact_candidate_limit,
                 "pruning_min_gain": self.config.pruning_min_gain,
                 "weighting": self.config.weighting,
+                "tree_format_version": TREE_FORMAT_VERSION,
                 "training_notes": self.training_notes,
                 "root_pattern": pattern,
                 "root_guessed_letters": sorted(guessed),
@@ -430,8 +433,6 @@ class HangmanTreeBuilder:
             return "solved"
         if remaining_lives <= 0 or not candidates:
             return "loss"
-        if len(candidates) == 1:
-            return "deterministic"
         if not any(letter not in guessed for letter in ALPHABET):
             return "exhausted"
         return None
